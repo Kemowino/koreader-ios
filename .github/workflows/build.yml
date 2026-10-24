@@ -1,226 +1,63 @@
-name: macos
+name: Build KOReader iOS IPA
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-on: [push, pull_request]
-
-defaults:
-  run:
-    shell: bash
+on:
+  workflow_dispatch:
 
 jobs:
-
-  macos:
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - image: '15'
-            platform: 'x86-64'
-            xcode_version: '16.4'
-            deployment_target: '10.15'
-            jobs: 5
-          - image: '15'
-            platform: 'ARM64'
-            xcode_version: '16.4'
-            deployment_target: '11.0'
-            jobs: 4
-
-    name: "macOS ${{ matrix.image }} ${{ matrix.platform }} 🔨${{ matrix.xcode_version }} 🎯${{ matrix.deployment_target }}"
-
-    runs-on: "macos-${{ matrix.image }}${{ matrix.platform == 'x86-64' && '-intel' || '' }}"
-
-    env:
-      # Bump first number to reset all caches.
-      CACHE_KEY: "1-macOS-${{ matrix.image }}-${{ matrix.platform }}-XC${{ matrix.xcode_version }}-DT${{ matrix.deployment_target }}"
-      CLICOLOR_FORCE: '1'
-      KODEBUG: ""
-      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment_target }}
-      MAKEFLAGS: OUTPUT_DIR=build PARALLEL_JOBS=${{ matrix.jobs }} INSTALL_DIR=install TARGET=macos
-
+  build-ipa:
+    runs-on: macos-15
     steps:
+      - name: Checkout koreader-ios with submodules
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
 
-      # Install dependencies. {{{
-
-      - name: XCode version
+      - name: Install required KOReader iOS build tools
         run: |
-          sudo xcode-select -s /Applications/Xcode_${{ matrix.xcode_version }}.app
-          xcodebuild -version
-          xcode-select -p
+          brew install autoconf automake bash binutils cmake coreutils findutils \
+            gettext gnu-getopt gnu-sed libtool make meson nasm ninja pkgconf \
+            sdl3 util-linux xcodegen
 
-      - name: Setup Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
+          BREW_PREFIX="$(brew --prefix)"
+          echo "${BREW_PREFIX}/opt/make/libexec/gnubin" >> $GITHUB_PATH
+          echo "${BREW_PREFIX}/opt/findutils/libexec/gnubin" >> $GITHUB_PATH
+          echo "${BREW_PREFIX}/opt/coreutils/libexec/gnubin" >> $GITHUB_PATH
+          echo "${BREW_PREFIX}/opt/gnu-sed/libexec/gnubin" >> $GITHUB_PATH
+          echo "${BREW_PREFIX}/opt/gnu-getopt/bin" >> $GITHUB_PATH
+          echo "${BREW_PREFIX}/opt/util-linux/bin" >> $GITHUB_PATH
+          echo "${BREW_PREFIX}/opt/binutils/bin" >> $GITHUB_PATH
+          echo "${BREW_PREFIX}/opt/gettext/bin" >> $GITHUB_PATH
 
-      - name: Install dependencies
+      - name: Download and bundle Syncery plugin
         run: |
-          set -x
-          python3 -m pip install --disable-pip-version-check meson ruamel.yaml
-          wget -O ninjatracing.zip https://github.com/cradleapps/ninjatracing/archive/084212eaf68f25c70579958a2ed67fb4ec2a9ca4.zip
-          unzip -j ninjatracing.zip '*/ninjatracing'
-          install -m755 ninjatracing /usr/local/bin/
-          rm ninjatracing*
-          # Install brew packages.
-          packages=(
-            autoconf
-            automake
-            bash
-            binutils
-            coreutils
-            findutils
-            libtool
-            make
-            nasm
-            ninja
-            pkg-config
-            util-linux
-          )
-          # Don't auto-update.
-          export HOMEBREW_NO_AUTO_UPDATE=1
-          # Don't upgrade already installed formulas.
-          export HOMEBREW_NO_INSTALL_UPGRADE=1
-          # Remove some installed packages to prevent brew
-          # from attempting (and failing) to upgrade them.
-          brew uninstall gradle maven
-          brew install --formula --overwrite --quiet "${packages[@]}"
+          git clone https://github.com/d0nizam/syncery.koplugin.git plugins/syncery.koplugin
+          rm -rf plugins/syncery.koplugin/.git
 
-      - name: Update PATH
-        run: >
-          printf '%s\n'
-          "$(brew --prefix)/opt/findutils/libexec/gnubin"
-          "$(brew --prefix)/opt/make/libexec/gnubin"
-          "$(brew --prefix)/opt/util-linux/bin"
-          | tee "${GITHUB_PATH}"
-
-      # }}}
-
-      # Checkout / fetch. {{{
-
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          clean: false
-          fetch-depth: 0
-          filter: tree:0
-          show-progress: false
-
-      - name: Fetch
-        run: make fetchthirdparty
-
-      # }}}
-
-      - name: Generate cache key
-        run: make TARGET= cache-key
-
-      - name: Restore build directory
-        id: build-restore
-        uses: actions/cache/restore@v5
-        with:
-          path: build
-          key: ${{ env.CACHE_KEY }}-build-${{ hashFiles('cache-key') }}
-
-      # Restore / setup build cache. {{{
-
-      - name: Lookup or restore build cache
-        id: ccache-restore
-        uses: actions/cache/restore@v5
-        with:
-          path: /Users/runner/Library/Caches/ccache
-          key: ${{ env.CACHE_KEY }}-ccache-${{ hashFiles('cache-key') }}
-          restore-keys: ${{ env.CACHE_KEY }}-ccache-
-          # When not building, do a lookup so the cache
-          # does not get removed after 7 days with no use.
-          lookup-only: ${{ steps.build-restore.outputs.cache-hit }}
-
-      - name: Install ccache
-        if: steps.build-restore.outputs.cache-hit != 'true'
+      - name: Build host LuaJIT and generate Xcode project
         run: |
-          wget --progress=dot:mega https://github.com/ccache/ccache/releases/download/v4.10.2/ccache-4.10.2-darwin.tar.gz
-          tar xf ccache-4.10.2-darwin.tar.gz
-          printf '%s\n' "$PWD/ccache-4.10.2-darwin" >>"${GITHUB_PATH}"
+          make TARGET=macos base
+          make TARGET=ios xcodeproj
 
-      - name: Setup build cache
-        if: steps.build-restore.outputs.cache-hit != 'true'
+      - name: Compile unsigned iOS .app and package .ipa
         run: |
-          set -x
-          which ccache
-          ccache --version
-          ccache --zero-stats
-          ccache --max-size=256M
-          ccache --show-config
+          xcodebuild -project KOReader.xcodeproj \
+            -scheme KOReader \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build_out \
+            ENABLE_USER_SCRIPT_SANDBOXING=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+          mkdir -p Payload
+          APP_PATH=$(find build_out -name "KOReader.app" -type d | head -n 1)
+          cp -R "$APP_PATH" Payload/
+          zip -qr KOReader-Syncery.ipa Payload
 
-      # }}}
-
-      # Build. {{{
-
-      - name: Build
-        id: build
-        if: steps.build-restore.outputs.cache-hit != 'true'
-        run: make base
-
-      - name: Dump build timings
-        if: contains('failure success', steps.build.conclusion) && !cancelled()
-        run: make buildstats
-
-      # }}}
-
-      # Clean / save build cache. {{{
-
-      - name: Clean caches
-        if: contains('failure success', steps.build.conclusion) && !cancelled()
-        run: |
-          set -x
-          # Trim the build directory.
-          rm -rf build/{cmake,staging,thirdparty}
-          ccache --cleanup >/dev/null
-          ccache --show-stats --verbose
-
-      - name: Save build cache
-        uses: actions/cache/save@v5
-        if: steps.build-restore.outputs.cache-hit != 'true' && steps.ccache-restore.outputs.cache-hit != 'true'
+      - name: Upload Finished IPA
+        uses: actions/upload-artifact@v4
         with:
-          path: /Users/runner/Library/Caches/ccache
-          key: ${{ steps.ccache-restore.outputs.cache-primary-key }}
-
-      # }}}
-
-      # Dump & check binaries. {{{
-
-      - name: Dump binaries runtime path & dependencies
-        run: make bininfo
-
-      - name: Checking binaries for missing dependencies
-        run: make bincheck
-
-      # }}}
-
-      - name: Save build directory
-        uses: actions/cache/save@v5
-        if: steps.build-restore.outputs.cache-hit != 'true'
-        with:
-          path: build
-          key: ${{ steps.build-restore.outputs.cache-primary-key }}
-
-      - name: Test
-        run: ./base/utils/fake_tty.py make --assume-old=base testfront
-
-      # Generate / upload artifact. {{{
-
-      - name: Generate artifact
-        # Note: ensure the build skeleton is created, so there are no dangling
-        # symlinks (e.g. `data/dict`) to trip 7zip during artifact generation…
-        run: make skeleton update --assume-old=base
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v7
-        with:
-          archive: false
-          path: '*.7z'
-
-      # }}}
-
-# vim: foldmethod=marker foldlevel=0
+          name: KOReader-Syncery-IPA
+          path: KOReader-Syncery.ipa
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
