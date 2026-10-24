@@ -1,0 +1,49 @@
+name: Build KOReader iOS IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-ipa:
+    runs-on: macos-15
+    steps:
+      - name: Checkout koreader-ios with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build tools
+        run: |
+          brew install cmake ninja meson pkg-config autoconf automake libtool gettext gnu-sed make
+          echo "/opt/homebrew/opt/make/libexec/gnubin" >> $GITHUB_PATH
+          echo "/usr/local/opt/make/libexec/gnubin" >> $GITHUB_PATH
+
+      - name: Download and bundle Syncery plugin
+        run: |
+          git clone https://github.com/d0nizam/syncery.koplugin.git plugins/syncery.koplugin
+          rm -rf plugins/syncery.koplugin/.git
+
+      - name: Build host LuaJIT and iOS Xcode project
+        run: |
+          make TARGET=macos base
+          make TARGET=ios xcodeproj
+
+      - name: Compile unsigned iOS .app and package .ipa
+        run: |
+          xcodebuild -project KOReader.xcodeproj \
+            -scheme KOReader \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build_out \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+          mkdir -p Payload
+          cp -R build_out/Build/Products/Release-iphoneos/KOReader.app Payload/
+          zip -qr KOReader-Syncery.ipa Payload
+
+      - name: Upload Finished IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: KOReader-Syncery-IPA
+          path: KOReader-Syncery.ipa
